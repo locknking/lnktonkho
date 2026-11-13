@@ -18,7 +18,7 @@ import {
 import { PO_STAGES, STAGE_INDEX, usePoSchedule, buildGhiChuWithMeta, computeStatusFromDone } from './xnkStages';
 import { PoStageTable, PoStageStepper } from './PoStageViews';
 import { PoLotsPanel } from './PoLotsPanel';
-import { buildPoLinesMap, getPoLines } from './xnkPoLines';
+import { buildPoLinesMap, getPoLines, buildLineGhiChu } from './xnkPoLines';
 import {
   usePoLots,
   buildLotsMap,
@@ -217,7 +217,7 @@ export function XnkTrackingMatrixContent({
           if (String(nhan) === String(line.slg_thuc_nhan)) continue;
           await updateRow('xnk_donhang_ct', line._sheetRow, [
             line.ma_po, line.stt, line.id_y_tuong, line.id_mau, line.sku, line.ten_sp,
-            line.so_luong, line.don_gia, line.thanh_tien, nhan, line.ghi_chu
+            line.so_luong, line.don_gia, line.thanh_tien, nhan, buildLineGhiChu(line.ghi_chu, line.tien_te, line.don_gia)
           ]);
         }
       }

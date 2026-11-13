@@ -29,7 +29,19 @@ import {
   Plus,
   Trash2
 } from 'lucide-react';
-import { buildPoLinesMap, getPoLines, summarizePoLines } from './xnkPoLines';
+import {
+  buildPoLinesMap,
+  getPoLines,
+  summarizePoLines,
+  CURRENCIES,
+  parseMoneyInput,
+  sanitizeMoneyInput,
+  moneyToInput,
+  formatMoney,
+  lineCurrency,
+  lineAmount,
+  buildLineGhiChu
+} from './xnkPoLines';
 import { PO_STAGES, STAGE_INDEX, usePoSchedule, stripTiendoMeta, buildGhiChuWithMeta, computeStatusFromDone, calcDurationDays } from './xnkStages';
 import { PoStageTable, PoStageGantt } from './PoStageViews';
 import { PoLotsPanel } from './PoLotsPanel';
@@ -56,7 +68,8 @@ function newPoLine(data = {}) {
     sku: '',
     ten_sp: '',
     so_luong: 100,
-    don_gia: 0,
+    don_gia: '',
+    tien_te: CURRENCIES.VND,
     slg_thuc_nhan: '',
     ghi_chu: '',
     ...data
@@ -169,6 +182,7 @@ export function XnkDonHangDrawer({
   // Tổng hợp từ các dòng SP
   const poSummary = useMemo(() => summarizePoLines(effectiveLines), [effectiveLines]);
   const tongTien = poSummary.tong_tien;
+  const tongTienUsd = poSummary.tong_tien_usd;
   const tongSoLuong = poSummary.so_luong;
   const slgThucNhan = poSummary.slg_thuc_nhan;
 
@@ -265,7 +279,8 @@ export function XnkDonHangDrawer({
     sku: l.sku,
     ten_sp: l.ten_sp,
     so_luong: l.so_luong,
-    don_gia: l.don_gia,
+    don_gia: moneyToInput(l.don_gia),
+    tien_te: lineCurrency(l),
     slg_thuc_nhan: l.slg_thuc_nhan,
     ghi_chu: l.ghi_chu
   });
@@ -313,7 +328,7 @@ export function XnkDonHangDrawer({
           id_mau: initialSample.id_mau || '',
           sku: initialSample.sku || initialSample.sku_du_kien || '',
           ten_sp: initialSample.ten_sp || '',
-          don_gia: cleanNumber(initialSample.gia_mau) || 0
+          don_gia: moneyToInput(cleanNumber(initialSample.gia_mau) || '')
         })]);
         setTenNcc(initialSample.ten_ncc || '');
       } else {
@@ -334,6 +349,16 @@ export function XnkDonHangDrawer({
     }
     setErrorMsg('');
   }, [editItem, initialSample, isOpen]);
+
+  // Giá gợi ý (mẫu thử / DS SP) là VNĐ: chỉ tự điền khi dòng đang tính VNĐ và chưa nhập giá
+  const canAutoFillPrice = (line) => lineCurrency(line) === CURRENCIES.VND && !parseMoneyInput(line.don_gia);
+
+  // Đổi tiền tệ đơn giá VNĐ <-> $: xoá giá cũ để nhập lại
+  const setLineCurrency = (uid, currency) => {
+    setLines(prev => prev.map(l => (l.uid === uid && lineCurrency(l) !== currency
+      ? { ...l, tien_te: currency, don_gia: '' }
+      : l)));
+  };
 
   // Luồng 1: Chọn Ý tưởng cho 1 dòng -> Tự điền SKU, Tên SP và gợi ý Mẫu thử
   const handleSelectIdea = (uid, selectedIdeaId) => {
@@ -359,7 +384,7 @@ export function XnkDonHangDrawer({
       const singleSample = matchingSamples[0];
       patch.id_mau = singleSample.id_mau;
       if (singleSample.ten_ncc && !tenNcc) setTenNcc(singleSample.ten_ncc);
-      if (singleSample.gia_mau && !cleanNumber(line.don_gia)) patch.don_gia = singleSample.gia_mau;
+      if (singleSample.gia_mau && canAutoFillPrice(line)) patch.don_gia = moneyToInput(cleanNumber(singleSample.gia_mau));
     }
     updateLine(uid, patch);
   };
@@ -372,7 +397,7 @@ export function XnkDonHangDrawer({
     const foundSample = approvedSamples.find(s => s.id_mau === sampleId);
     if (foundSample) {
       if (foundSample.ten_ncc && !tenNcc) setTenNcc(foundSample.ten_ncc);
-      if (foundSample.gia_mau && !cleanNumber(line.don_gia)) patch.don_gia = foundSample.gia_mau;
+      if (foundSample.gia_mau && canAutoFillPrice(line)) patch.don_gia = moneyToInput(cleanNumber(foundSample.gia_mau));
 
       if (foundSample.id_y_tuong) {
         patch.id_y_tuong = foundSample.id_y_tuong;
@@ -392,7 +417,7 @@ export function XnkDonHangDrawer({
     if (!line || !prod) return;
     const patch = { sku: prod.id };
     if (prod.name) patch.ten_sp = prod.name;
-    if (prod.price && !cleanNumber(line.don_gia)) patch.don_gia = prod.price;
+    if (prod.price && canAutoFillPrice(line)) patch.don_gia = moneyToInput(prod.price);
     updateLine(uid, patch);
   };
 
@@ -492,7 +517,7 @@ export function XnkDonHangDrawer({
       // ['ma_po', 'stt', 'id_y_tuong', 'id_mau', 'sku', 'ten_sp', 'so_luong', 'don_gia', 'thanh_tien', 'slg_thuc_nhan', 'ghi_chu']
       const lineRows = filledLines.map((l, idx) => {
         const sl = cleanNumber(l.so_luong) || 0;
-        const dg = cleanNumber(l.don_gia) || 0;
+        const dg = parseMoneyInput(l.don_gia) || 0;
         return [
           maPo.trim(),
           idx + 1,
@@ -502,9 +527,9 @@ export function XnkDonHangDrawer({
           String(l.ten_sp || '').trim(),
           sl,
           dg,
-          sl * dg,
+          lineAmount(l),
           l.slg_thuc_nhan !== '' && l.slg_thuc_nhan !== undefined ? cleanNumber(l.slg_thuc_nhan) : '',
-          String(l.ghi_chu || '').trim()
+          buildLineGhiChu(String(l.ghi_chu || '').trim(), lineCurrency(l), dg)
         ];
       });
       const oldPoCode = String((editItem && editItem.ma_po) || maPo).trim().toUpperCase();
@@ -659,7 +684,9 @@ export function XnkDonHangDrawer({
               const lineSample = line.id_mau ? approvedSamples.find(s => s.id_mau === line.id_mau) : null;
               const nccMismatch = lineSample && lineSample.ten_ncc && tenNcc.trim() &&
                 lineSample.ten_ncc.trim().toLowerCase() !== tenNcc.trim().toLowerCase();
-              const thanhTien = (cleanNumber(line.so_luong) || 0) * (cleanNumber(line.don_gia) || 0);
+              const thanhTien = lineAmount(line);
+              const cur = lineCurrency(line);
+              const isUsd = cur === CURRENCIES.USD;
               return (
                 <div key={line.uid} className="p-3 rounded-xl border border-slate-200 bg-slate-50/50 space-y-2">
                   <div className="flex items-center justify-between">
@@ -753,19 +780,46 @@ export function XnkDonHangDrawer({
                       />
                     </div>
                     <div>
-                      <label className="block text-[11px] font-bold text-slate-600 mb-1">Đơn giá (VNĐ)</label>
-                      <input
-                        type="number"
-                        min="0"
-                        value={line.don_gia}
-                        onChange={(e) => updateLine(line.uid, { don_gia: e.target.value })}
-                        className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-semibold text-slate-800 focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none"
-                      />
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="block text-[11px] font-bold text-slate-600">Đơn giá ({isUsd ? '$' : 'VNĐ'})</label>
+                        {!readOnly && (
+                          <div
+                            className="inline-flex rounded-md border border-slate-200 bg-white p-0.5 text-[10px] font-black leading-none"
+                            title="Đổi đơn vị tiền (sẽ xoá giá đang nhập để nhập lại)"
+                          >
+                            {[CURRENCIES.VND, CURRENCIES.USD].map(c => (
+                              <button
+                                key={c}
+                                type="button"
+                                onClick={() => setLineCurrency(line.uid, c)}
+                                className={`px-1.5 py-0.5 rounded transition ${c === cur
+                                  ? (c === CURRENCIES.USD ? 'bg-amber-500 text-white' : 'bg-blue-600 text-white')
+                                  : 'text-slate-500 hover:bg-slate-100'}`}
+                              >
+                                {c === CURRENCIES.USD ? '$' : 'VNĐ'}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                      <div className="relative">
+                        {isUsd && (
+                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-bold text-amber-600 pointer-events-none">$</span>
+                        )}
+                        <input
+                          type="text"
+                          inputMode="decimal"
+                          value={line.don_gia}
+                          onChange={(e) => updateLine(line.uid, { don_gia: sanitizeMoneyInput(e.target.value) })}
+                          placeholder={isUsd ? 'VD: 15,05' : 'VD: 22124,500'}
+                          className={`w-full ${isUsd ? 'pl-6' : 'pl-3'} pr-3 py-2 bg-white border rounded-xl text-xs font-semibold text-slate-800 focus:ring-2 outline-none ${isUsd ? 'border-amber-300 focus:ring-amber-500/20 focus:border-amber-500' : 'border-slate-200 focus:ring-blue-500/20 focus:border-blue-500'}`}
+                        />
+                      </div>
                     </div>
                     <div>
-                      <label className="block text-[11px] font-bold text-slate-600 mb-1">Thành tiền</label>
-                      <div className="w-full px-3 py-2 bg-emerald-50 border border-emerald-200 rounded-xl text-xs font-black text-emerald-700">
-                        {formatCurrency(thanhTien)}
+                      <label className="block text-[11px] font-bold text-slate-600 mb-1">Thành tiền ({isUsd ? '$' : 'VNĐ'})</label>
+                      <div className={`w-full px-3 py-2 border rounded-xl text-xs font-black ${isUsd ? 'bg-amber-50 border-amber-200 text-amber-700' : 'bg-emerald-50 border-emerald-200 text-emerald-700'}`}>
+                        {formatMoney(thanhTien, cur)}
                       </div>
                     </div>
                     <div>
@@ -838,7 +892,10 @@ export function XnkDonHangDrawer({
             <div>
               <label className="block text-xs font-bold text-slate-700 mb-1">Tổng giá trị PO</label>
               <div className="w-full px-3 py-2 bg-emerald-50 border border-emerald-200 rounded-xl text-xs font-black text-emerald-700">
-                {formatCurrency(tongTien)}
+                {tongTienUsd > 0 && tongTien === 0 ? null : formatMoney(tongTien, CURRENCIES.VND)}
+                {tongTienUsd > 0 && (
+                  <span className="text-amber-700">{tongTien > 0 ? ' + ' : ''}{formatMoney(tongTienUsd, CURRENCIES.USD)}</span>
+                )}
               </div>
             </div>
 

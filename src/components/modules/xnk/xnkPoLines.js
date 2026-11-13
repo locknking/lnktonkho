@@ -4,6 +4,84 @@ import { cleanNumber } from '../../../utils/formatters';
 // ['ma_po', 'stt', 'id_y_tuong', 'id_mau', 'sku', 'ten_sp', 'so_luong', 'don_gia', 'thanh_tien', 'slg_thuc_nhan', 'ghi_chu']
 
 const norm = (v) => (v === undefined || v === null ? '' : String(v)).trim();
+
+// ---------------------------------------------------------------------
+// Tiền tệ đơn giá (VND / USD) + số thập phân
+// Lưu kèm trong cột ghi_chu của dòng SP: "<ghi chú> [gia:tt=USD;dg=15.05]"
+// (cột don_gia trên Sheets có thể bị định dạng lại nên giữ bản chính xác ở đây)
+// ---------------------------------------------------------------------
+export const CURRENCIES = { VND: 'VND', USD: 'USD' };
+const round3 = (n) => Math.round(n * 1000) / 1000;
+
+// "15,05" | "15.05" | "30,115" -> số; rỗng -> ''
+export function parseMoneyInput(val) {
+  if (val === null || val === undefined) return '';
+  if (typeof val === 'number') return Number.isFinite(val) ? val : '';
+  const s = String(val).replace(/\s/g, '').replace(',', '.');
+  if (s === '' || s === '.') return '';
+  const n = parseFloat(s);
+  return Number.isNaN(n) ? '' : n;
+}
+
+// Chỉ cho gõ số + 1 dấu thập phân (, hoặc .), tối đa 3 chữ số thập phân
+export function sanitizeMoneyInput(raw) {
+  let s = String(raw || '').replace(/[^0-9.,]/g, '');
+  const i = s.search(/[.,]/);
+  if (i === -1) return s;
+  const intPart = s.slice(0, i);
+  const dec = s.slice(i + 1).replace(/[.,]/g, '').slice(0, 3);
+  return `${intPart || '0'},${dec}`;
+}
+
+// Hiển thị số trong ô nhập (dấu phẩy thập phân)
+export function moneyToInput(n) {
+  if (n === '' || n === null || n === undefined) return '';
+  return String(n).replace('.', ',');
+}
+
+export function formatMoney(num, currency = CURRENCIES.VND) {
+  const val = Number(num);
+  const safe = Number.isFinite(val) ? val : 0;
+  if (currency === CURRENCIES.USD) {
+    return '$' + safe.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 3 });
+  }
+  return safe.toLocaleString('vi-VN', { maximumFractionDigits: 3 }) + ' ₫';
+}
+
+export function lineCurrency(line) {
+  return line && line.tien_te === CURRENCIES.USD ? CURRENCIES.USD : CURRENCIES.VND;
+}
+
+export function lineAmount(line) {
+  const sl = cleanNumber(line?.so_luong) || 0;
+  const dg = parseMoneyInput(line?.don_gia) || 0;
+  return round3(sl * dg);
+}
+
+function extractLineMeta(ghiChu) {
+  const m = String(ghiChu || '').match(/\[gia:([^\]]+)\]/);
+  if (!m) return {};
+  const meta = {};
+  m[1].split(';').forEach(p => {
+    const [k, v] = p.split('=');
+    if (k && v !== undefined) meta[k.trim()] = v.trim();
+  });
+  return meta;
+}
+
+export function stripLineMeta(ghiChu) {
+  return String(ghiChu || '').replace(/\s*\[gia:[^\]]+\]\s*/g, '').trim();
+}
+
+// Ghép ghi chú dòng SP + metadata tiền tệ (chỉ ghi khi là USD hoặc có số lẻ)
+export function buildLineGhiChu(note, currency, donGia) {
+  const clean = stripLineMeta(note);
+  const dg = parseMoneyInput(donGia);
+  const needMeta = currency === CURRENCIES.USD || (dg !== '' && !Number.isInteger(dg));
+  if (!needMeta) return clean;
+  const meta = `[gia:tt=${currency === CURRENCIES.USD ? 'USD' : 'VND'};dg=${dg === '' ? 0 : dg}]`;
+  return clean ? `${clean} ${meta}` : meta;
+}
 const poKey = (maPo) => norm(maPo).toUpperCase();
 
 // Gom các dòng chi tiết theo mã PO -> { [MA_PO]: [{ _sheetRow, ...line }] }
@@ -13,6 +91,10 @@ export function buildPoLinesMap(ctData) {
   ctData.slice(1).forEach((r, idx) => {
     const key = poKey(r[0]);
     if (!key) return;
+    const meta = extractLineMeta(r[10]);
+    const metaDg = meta.dg !== undefined ? parseMoneyInput(meta.dg) : '';
+    const soLuong = cleanNumber(r[6]) || 0;
+    const donGia = metaDg !== '' ? metaDg : (cleanNumber(r[7]) || 0);
     const line = {
       _sheetRow: idx + 2,
       ma_po: norm(r[0]),
@@ -21,11 +103,12 @@ export function buildPoLinesMap(ctData) {
       id_mau: norm(r[3]),
       sku: norm(r[4]),
       ten_sp: norm(r[5]),
-      so_luong: cleanNumber(r[6]) || 0,
-      don_gia: cleanNumber(r[7]) || 0,
-      thanh_tien: cleanNumber(r[8]) || 0,
+      so_luong: soLuong,
+      don_gia: donGia,
+      tien_te: meta.tt === 'USD' ? CURRENCIES.USD : CURRENCIES.VND,
+      thanh_tien: metaDg !== '' ? round3(soLuong * metaDg) : (cleanNumber(r[8]) || 0),
       slg_thuc_nhan: r[9] !== undefined && r[9] !== '' ? cleanNumber(r[9]) : '',
-      ghi_chu: norm(r[10])
+      ghi_chu: stripLineMeta(r[10])
     };
     if (!line.sku && !line.ten_sp && !line.id_mau && !line.id_y_tuong) return;
     (map[key] = map[key] || []).push(line);
@@ -49,6 +132,7 @@ export function getPoLines(order, linesMap) {
     ten_sp: norm(order.ten_sp),
     so_luong: cleanNumber(order.so_luong) || 0,
     don_gia: cleanNumber(order.don_gia) || 0,
+    tien_te: CURRENCIES.VND,
     thanh_tien: cleanNumber(order.tong_tien) || 0,
     slg_thuc_nhan: order.slg_thuc_nhan !== undefined ? order.slg_thuc_nhan : '',
     ghi_chu: ''
@@ -60,7 +144,9 @@ export function summarizePoLines(lines) {
   const valid = (lines || []).filter(l => norm(l.sku) || norm(l.ten_sp));
   const uniq = (arr) => Array.from(new Set(arr.map(norm).filter(Boolean)));
   const soLuong = valid.reduce((s, l) => s + (cleanNumber(l.so_luong) || 0), 0);
-  const tongTien = valid.reduce((s, l) => s + (cleanNumber(l.so_luong) || 0) * (cleanNumber(l.don_gia) || 0), 0);
+  // Tổng tiền tách theo tiền tệ (không quy đổi tỷ giá)
+  const tongTien = round3(valid.filter(l => lineCurrency(l) === CURRENCIES.VND).reduce((s, l) => s + lineAmount(l), 0));
+  const tongTienUsd = round3(valid.filter(l => lineCurrency(l) === CURRENCIES.USD).reduce((s, l) => s + lineAmount(l), 0));
   const hasNhan = valid.some(l => l.slg_thuc_nhan !== '' && l.slg_thuc_nhan !== undefined && l.slg_thuc_nhan !== null);
   const slgThucNhan = hasNhan ? valid.reduce((s, l) => s + (cleanNumber(l.slg_thuc_nhan) || 0), 0) : '';
   const firstName = norm(valid[0]?.ten_sp);
@@ -70,8 +156,9 @@ export function summarizePoLines(lines) {
     sku: uniq(valid.map(l => l.sku)).join(', '),
     ten_sp: valid.length > 1 ? `${firstName} (+${valid.length - 1} SP khác)` : firstName,
     so_luong: soLuong,
-    don_gia: valid.length === 1 ? (cleanNumber(valid[0].don_gia) || 0) : '',
+    don_gia: valid.length === 1 ? (parseMoneyInput(valid[0].don_gia) || 0) : '',
     tong_tien: tongTien,
+    tong_tien_usd: tongTienUsd,
     slg_thuc_nhan: slgThucNhan
   };
 }

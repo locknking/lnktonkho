@@ -37,7 +37,7 @@ import {
   Maximize2,
   BarChart3
 } from 'lucide-react';
-import { buildPoLinesMap, getPoLines, poHasLine } from './xnkPoLines';
+import { buildPoLinesMap, getPoLines, poHasLine, formatMoney, lineCurrency } from './xnkPoLines';
 
 export function XnkChiTietModal({
   isOpen,
@@ -955,12 +955,10 @@ export function XnkChiTietModal({
                                     {formatNumber(line.so_luong)}
                                   </td>
                                   <td className="py-2.5 px-3 text-right text-slate-600 whitespace-nowrap">
-                                    {line.don_gia ? formatCurrency(line.don_gia) : '-'}
+                                    {line.don_gia ? formatMoney(line.don_gia, lineCurrency(line)) : '-'}
                                   </td>
                                   <td className="py-2.5 px-3 text-right font-bold text-emerald-700 whitespace-nowrap">
-                                    {line.thanh_tien 
-                                      ? formatCurrency(line.thanh_tien) 
-                                      : formatCurrency((cleanNumber(line.so_luong) || 0) * (cleanNumber(line.don_gia) || 0))}
+                                    {formatMoney(line.thanh_tien || ((cleanNumber(line.so_luong) || 0) * (Number(line.don_gia) || 0)), lineCurrency(line))}
                                   </td>
                                   {poLines.some(l => l.slg_thuc_nhan !== '' && l.slg_thuc_nhan !== undefined) && (
                                     <td className="py-2.5 px-3 text-right font-semibold text-indigo-700 whitespace-nowrap">
