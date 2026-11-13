@@ -37,7 +37,7 @@ import {
   Maximize2,
   BarChart3
 } from 'lucide-react';
-import { buildPoLinesMap, getPoLines, poHasLine, formatMoney, lineCurrency } from './xnkPoLines';
+import { buildPoLinesMap, getPoLines, poHasLine, formatMoney, lineCurrency, getPoMoney } from './xnkPoLines';
 
 export function XnkChiTietModal({
   isOpen,
@@ -808,6 +808,7 @@ export function XnkChiTietModal({
                 <div className="space-y-3">
                   {relatedOrders.map((po, idx) => {
                     const poLines = getPoLines(po, poLinesMap);
+                    const poMoney = getPoMoney(po, poLinesMap);
                     return (
                     <div 
                       key={po.ma_po || idx}
@@ -855,15 +856,15 @@ export function XnkChiTietModal({
                         </div>
                         <div>
                           <span className="text-[11px] text-slate-400 font-semibold block">Đơn giá:</span>
-                          <span className="text-xs font-semibold text-slate-800">{formatCurrency(po.don_gia)}</span>
+                          <span className="text-xs font-semibold text-slate-800">{formatMoney(poMoney.don_gia, poMoney.currency)}</span>
                         </div>
                         <div>
                           <span className="text-[11px] text-slate-400 font-semibold block">Tổng tiền PO:</span>
-                          <span className="text-xs font-black text-emerald-700">{formatCurrency(po.tong_tien)}</span>
+                          <span className="text-xs font-black text-emerald-700">{formatMoney(poMoney.tong_tien, poMoney.currency)}</span>
                         </div>
                         <div>
                           <span className="text-[11px] text-slate-400 font-semibold block">Tiền cọc xưởng:</span>
-                          <span className="text-xs font-bold text-amber-700">{formatCurrency(po.tien_coc)}</span>
+                          <span className="text-xs font-bold text-amber-700">{formatMoney(poMoney.tien_coc, poMoney.currency)}</span>
                         </div>
                       </div>
 
@@ -1536,7 +1537,7 @@ export function XnkChiTietModal({
                                 {formatNumber(o.so_luong)}
                               </td>
                               <td className="py-2.5 px-3 text-right font-bold text-emerald-700 whitespace-nowrap">
-                                {formatCurrency(o.tong_tien)}
+                                {(() => { const m = getPoMoney(o, poLinesMap); return formatMoney(m.tong_tien, m.currency); })()}
                               </td>
                               <td className="py-2.5 px-3 text-center whitespace-nowrap">
                                 <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-blue-50 text-blue-700 border border-blue-200">

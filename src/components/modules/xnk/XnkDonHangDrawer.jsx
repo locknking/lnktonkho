@@ -516,7 +516,7 @@ export function XnkDonHangDrawer({
         tenNcc.trim(),
         summary.so_luong,
         summary.don_gia,
-        summary.tong_tien,
+        isUsdPo ? summary.tong_tien_usd : summary.tong_tien,
         cocNum,
         schedRow.ngay_dat_hang,
         schedRow.ngay_sx_xong,

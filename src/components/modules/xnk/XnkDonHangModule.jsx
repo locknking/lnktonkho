@@ -34,7 +34,7 @@ import {
   Building2,
   SlidersHorizontal
 } from 'lucide-react';
-import { buildPoLinesMap, deletePoLines } from './xnkPoLines';
+import { buildPoLinesMap, deletePoLines, getPoMoney, formatMoney } from './xnkPoLines';
 import { buildLotsMap, deletePoLots } from './xnkLots';
 import { getPoStatusBadgeClass } from './xnkStages';
 
@@ -225,6 +225,13 @@ export function XnkDonHangModule({ onNavigate }) {
   };
 
   const poLinesMap = useMemo(() => buildPoLinesMap(xnkDonHangCtData), [xnkDonHangCtData]);
+  // Tiền của từng PO theo đúng đơn vị VNĐ / $
+  const poMoneyMap = useMemo(() => {
+    const map = {};
+    donHangList.forEach(o => { map[o._sheetRow] = getPoMoney(o, poLinesMap); });
+    return map;
+  }, [donHangList, poLinesMap]);
+  const moneyOf = (item) => poMoneyMap[item._sheetRow] || { currency: 'VND', don_gia: item.don_gia, tong_tien: item.tong_tien, tien_coc: item.tien_coc };
   const lotsMap = useMemo(() => buildLotsMap(xnkLoHangData), [xnkLoHangData]);
 
   const handleDelete = async (sheetRow, maPo) => {
@@ -562,19 +569,19 @@ export function XnkDonHangModule({ onNavigate }) {
                             case 'don_gia':
                               return (
                                 <td key={col.key} style={widthStyle} className={`py-2.5 px-3 font-medium text-slate-700 whitespace-nowrap ${alignClass} ${formatClass}`}>
-                                  {formatCurrency(item.don_gia)}
+                                  {formatMoney(moneyOf(item).don_gia, moneyOf(item).currency)}
                                 </td>
                               );
                             case 'tong_tien':
                               return (
                                 <td key={col.key} style={widthStyle} className={`py-2.5 px-3 font-bold text-emerald-700 whitespace-nowrap ${alignClass} ${formatClass}`}>
-                                  {formatCurrency(item.tong_tien)}
+                                  {formatMoney(moneyOf(item).tong_tien, moneyOf(item).currency)}
                                 </td>
                               );
                             case 'tien_coc':
                               return (
                                 <td key={col.key} style={widthStyle} className={`py-2.5 px-3 font-semibold text-amber-700 whitespace-nowrap ${alignClass} ${formatClass}`}>
-                                  {formatCurrency(item.tien_coc)}
+                                  {formatMoney(moneyOf(item).tien_coc, moneyOf(item).currency)}
                                 </td>
                               );
                             case 'ke_hoach_ban':

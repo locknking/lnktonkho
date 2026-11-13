@@ -1,4 +1,5 @@
 import { cleanNumber } from '../../../utils/formatters';
+import { extractTiendoMeta } from './xnkStages';
 
 // Cột chuẩn của sheet XNK_DON_HANG_CT (mỗi dòng = 1 sản phẩm trong PO)
 // ['ma_po', 'stt', 'id_y_tuong', 'id_mau', 'sku', 'ten_sp', 'so_luong', 'don_gia', 'thanh_tien', 'slg_thuc_nhan', 'ghi_chu']
@@ -161,6 +162,22 @@ export function summarizePoLines(lines) {
     tong_tien_usd: tongTienUsd,
     slg_thuc_nhan: slgThucNhan
   };
+}
+
+// Tiền của 1 PO theo đúng đơn vị (VND/USD) và số lẻ: ưu tiên dữ liệu chi tiết SP + meta ghi chú PO
+export function getPoMoney(order, linesMap) {
+  const meta = extractTiendoMeta(order && order.ghi_chu);
+  const lines = getPoLines(order, linesMap).filter(l => norm(l.sku) || norm(l.ten_sp));
+  const currency = meta.tt === 'USD' || (!meta.tt && lines.some(l => lineCurrency(l) === CURRENCIES.USD))
+    ? CURRENCIES.USD : CURRENCIES.VND;
+  const hasCt = lines.some(l => l._sheetRow);
+  const tongTien = hasCt
+    ? round3(lines.filter(l => lineCurrency(l) === currency).reduce((s, l) => s + lineAmount(l), 0))
+    : (cleanNumber(order && order.tong_tien) || 0);
+  const donGia = lines.length === 1 ? (parseMoneyInput(lines[0].don_gia) || 0) : (cleanNumber(order && order.don_gia) || 0);
+  const cocMeta = meta.cocv !== undefined ? parseMoneyInput(meta.cocv) : '';
+  const tienCoc = cocMeta !== '' ? cocMeta : (cleanNumber(order && order.tien_coc) || 0);
+  return { currency, don_gia: donGia, tong_tien: tongTien, tien_coc: tienCoc };
 }
 
 // Kiểm tra PO có chứa ít nhất 1 dòng SP thoả điều kiện `match(line)` hay không
