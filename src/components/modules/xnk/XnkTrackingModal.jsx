@@ -15,7 +15,7 @@ import {
   formatCurrency, 
   cleanNumber 
 } from '../../../utils/formatters';
-import { PO_STAGES, STAGE_INDEX, usePoSchedule, buildGhiChuWithMeta, computeStatusFromDone } from './xnkStages';
+import { PO_STAGES, STAGE_INDEX, usePoSchedule, buildGhiChuWithMeta, extractTiendoMeta, computeStatusFromDone } from './xnkStages';
 import { PoStageTable, PoStageStepper } from './PoStageViews';
 import { PoLotsPanel } from './PoLotsPanel';
 import { buildPoLinesMap, getPoLines, buildLineGhiChu } from './xnkPoLines';
@@ -228,7 +228,9 @@ export function XnkTrackingMatrixContent({
 
       const rawRow = (xnkDonHangData && xnkDonHangData[targetSheetRow - 1]) || [];
       const userGhiChu = (order.ghi_chu !== undefined ? order.ghi_chu : rawRow[18]) || '';
-      const finalGhiChu = buildGhiChuWithMeta(userGhiChu, row.meta);
+      // Giữ đơn vị tiền & tiền cọc chính xác (tt, cocv) đã lưu từ form PO
+      const oldMeta = extractTiendoMeta(userGhiChu);
+      const finalGhiChu = buildGhiChuWithMeta(userGhiChu, { ...row.meta, tt: oldMeta.tt, cocv: oldMeta.cocv });
 
       const rowValues = [
         (order.ma_po || rawRow[0] || '').toString().trim(),

@@ -42,7 +42,7 @@ import {
   lineAmount,
   buildLineGhiChu
 } from './xnkPoLines';
-import { PO_STAGES, STAGE_INDEX, usePoSchedule, stripTiendoMeta, buildGhiChuWithMeta, computeStatusFromDone, calcDurationDays } from './xnkStages';
+import { PO_STAGES, STAGE_INDEX, usePoSchedule, stripTiendoMeta, extractTiendoMeta, buildGhiChuWithMeta, computeStatusFromDone, calcDurationDays } from './xnkStages';
 import { PoStageTable, PoStageGantt } from './PoStageViews';
 import { PoLotsPanel } from './PoLotsPanel';
 import {
@@ -153,7 +153,11 @@ export function XnkDonHangDrawer({
   // 1. Thông tin đơn hàng cơ bản
   const [maPo, setMaPo] = useState('');
   const [tenNcc, setTenNcc] = useState('');
-  const [tienCoc, setTienCoc] = useState(0);
+  const [tienCoc, setTienCoc] = useState('');
+  // Đơn vị tiền của cả PO (Đơn giá, Thành tiền, Tổng giá trị, Tiền cọc dùng chung)
+  const [poCurrency, setPoCurrency] = useState(CURRENCIES.VND);
+  const isUsdPo = poCurrency === CURRENCIES.USD;
+  const curLabel = isUsdPo ? '$' : 'VNĐ';
 
   // Danh sách sản phẩm trong PO (1 PO - nhiều SP, mỗi SP liên kết Ý tưởng / Mẫu thử riêng)
   const [lines, setLines] = useState(() => [newPoLine()]);
@@ -189,9 +193,9 @@ export function XnkDonHangDrawer({
   const updateLine = (uid, patch) => {
     setLines(prev => prev.map(l => (l.uid === uid ? { ...l, ...patch } : l)));
   };
-  const addLine = () => setLines(prev => [...prev, newPoLine()]);
+  const addLine = () => setLines(prev => [...prev, newPoLine({ tien_te: poCurrency })]);
   const removeLine = (uid) => {
-    setLines(prev => (prev.length <= 1 ? [newPoLine()] : prev.filter(l => l.uid !== uid)));
+    setLines(prev => (prev.length <= 1 ? [newPoLine({ tien_te: poCurrency })] : prev.filter(l => l.uid !== uid)));
   };
 
   // 1. Parsed Ý tưởng từ xnkYtuongData
@@ -304,8 +308,14 @@ export function XnkDonHangDrawer({
       setMaPo(editItem.ma_po || '');
       setTenNcc(editItem.ten_ncc || '');
       linesLoadedFromSheetRef.current = !!poLinesMap[String(editItem.ma_po || '').trim().toUpperCase()];
-      setLines(getPoLines(editItem, poLinesMap).map(toFormLine));
-      setTienCoc(editItem.tien_coc !== undefined && editItem.tien_coc !== '' ? editItem.tien_coc : 0);
+      const loadedLines = getPoLines(editItem, poLinesMap).map(toFormLine);
+      const poMeta = extractTiendoMeta(editItem.ghi_chu);
+      const loadedCurrency = poMeta.tt === 'USD' || (!poMeta.tt && loadedLines.some(l => l.tien_te === CURRENCIES.USD))
+        ? CURRENCIES.USD : CURRENCIES.VND;
+      setPoCurrency(loadedCurrency);
+      setLines(loadedLines.map(l => ({ ...l, tien_te: loadedCurrency })));
+      const cocVal = poMeta.cocv !== undefined ? parseMoneyInput(poMeta.cocv) : cleanNumber(editItem.tien_coc);
+      setTienCoc(cocVal ? moneyToInput(cocVal) : '');
       
       // Ngày & Tiến độ các chặng
       sched.load(editItem);
@@ -336,7 +346,8 @@ export function XnkDonHangDrawer({
         setTenNcc('');
       }
 
-      setTienCoc(0);
+      setTienCoc('');
+      setPoCurrency(CURRENCIES.VND);
       
       sched.reset(formatDateInput(new Date()));
       lotsLoadedRef.current = false;
@@ -354,10 +365,11 @@ export function XnkDonHangDrawer({
   const canAutoFillPrice = (line) => lineCurrency(line) === CURRENCIES.VND && !parseMoneyInput(line.don_gia);
 
   // Đổi tiền tệ đơn giá VNĐ <-> $: xoá giá cũ để nhập lại
-  const setLineCurrency = (uid, currency) => {
-    setLines(prev => prev.map(l => (l.uid === uid && lineCurrency(l) !== currency
-      ? { ...l, tien_te: currency, don_gia: '' }
-      : l)));
+  const changePoCurrency = (currency) => {
+    if (currency === poCurrency) return;
+    setPoCurrency(currency);
+    setLines(prev => prev.map(l => ({ ...l, tien_te: currency, don_gia: '' })));
+    setTienCoc('');
   };
 
   // Luồng 1: Chọn Ý tưởng cho 1 dòng -> Tự điền SKU, Tên SP và gợi ý Mẫu thử
@@ -486,7 +498,12 @@ export function XnkDonHangDrawer({
         }
       }
 
-      const finalGhiChu = buildGhiChuWithMeta(ghiChu.trim(), schedRow.meta);
+      const cocNum = parseMoneyInput(tienCoc) || 0;
+      const finalGhiChu = buildGhiChuWithMeta(ghiChu.trim(), {
+        ...schedRow.meta,
+        tt: isUsdPo ? 'USD' : '',
+        cocv: (isUsdPo || !Number.isInteger(cocNum)) && cocNum ? cocNum : ''
+      });
 
       // 19 Cột chuẩn của Google Sheet XNK_DON_HANG:
       // ['ma_po', 'id_mau', 'sku', 'ten_sp', 'ten_ncc', 'so_luong', 'don_gia', 'tong_tien', 'tien_coc', 'ngay_dat_hang', 'ngay_sx_xong', 'tracking_van_chuyen', 'ngay_gui_hang', 'ngay_thong_quan', 'ngay_kho_nhan', 'slg_thuc_nhan', 'ke_hoach_ban', 'tinh_trang_cuoi', 'ghi_chu']
@@ -500,7 +517,7 @@ export function XnkDonHangDrawer({
         summary.so_luong,
         summary.don_gia,
         summary.tong_tien,
-        cleanNumber(tienCoc),
+        cocNum,
         schedRow.ngay_dat_hang,
         schedRow.ngay_sx_xong,
         poTracking,
@@ -785,13 +802,13 @@ export function XnkDonHangDrawer({
                         {!readOnly && (
                           <div
                             className="inline-flex rounded-md border border-slate-200 bg-white p-0.5 text-[10px] font-black leading-none"
-                            title="Đổi đơn vị tiền (sẽ xoá giá đang nhập để nhập lại)"
+                            title="Đổi đơn vị tiền cho cả PO (xoá đơn giá và tiền cọc để nhập lại)"
                           >
                             {[CURRENCIES.VND, CURRENCIES.USD].map(c => (
                               <button
                                 key={c}
                                 type="button"
-                                onClick={() => setLineCurrency(line.uid, c)}
+                                onClick={() => changePoCurrency(c)}
                                 className={`px-1.5 py-0.5 rounded transition ${c === cur
                                   ? (c === CURRENCIES.USD ? 'bg-amber-500 text-white' : 'bg-blue-600 text-white')
                                   : 'text-slate-500 hover:bg-slate-100'}`}
@@ -890,26 +907,29 @@ export function XnkDonHangDrawer({
             </div>
 
             <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">Tổng giá trị PO</label>
-              <div className="w-full px-3 py-2 bg-emerald-50 border border-emerald-200 rounded-xl text-xs font-black text-emerald-700">
-                {tongTienUsd > 0 && tongTien === 0 ? null : formatMoney(tongTien, CURRENCIES.VND)}
-                {tongTienUsd > 0 && (
-                  <span className="text-amber-700">{tongTien > 0 ? ' + ' : ''}{formatMoney(tongTienUsd, CURRENCIES.USD)}</span>
-                )}
+              <label className="block text-xs font-bold text-slate-700 mb-1">Tổng giá trị PO ({curLabel})</label>
+              <div className={`w-full px-3 py-2 border rounded-xl text-xs font-black ${isUsdPo ? 'bg-amber-50 border-amber-200 text-amber-700' : 'bg-emerald-50 border-emerald-200 text-emerald-700'}`}>
+                {formatMoney(isUsdPo ? tongTienUsd : tongTien, poCurrency)}
               </div>
             </div>
 
             <div>
               <label className="block text-xs font-bold text-slate-700 mb-1">
-                Tiền cọc xưởng (VNĐ)
+                Tiền cọc xưởng ({curLabel})
               </label>
-              <input
-                type="number"
-                min="0"
-                value={tienCoc}
-                onChange={(e) => setTienCoc(e.target.value)}
-                className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold text-amber-700 focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500 outline-none"
-              />
+              <div className="relative">
+                {isUsdPo && (
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-bold text-amber-600 pointer-events-none">$</span>
+                )}
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  value={tienCoc}
+                  onChange={(e) => setTienCoc(sanitizeMoneyInput(e.target.value))}
+                  placeholder="0"
+                  className={`w-full ${isUsdPo ? 'pl-6' : 'pl-3'} pr-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold text-amber-700 focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500 outline-none`}
+                />
+              </div>
             </div>
           </div>
         </div>
@@ -977,13 +997,13 @@ export function XnkDonHangDrawer({
                   case 'coc':
                     return (
                       <div className="flex items-center gap-1.5">
-                        <span className="text-slate-500 text-[11px] whitespace-nowrap">Tiền cọc:</span>
+                        <span className="text-slate-500 text-[11px] whitespace-nowrap">Tiền cọc ({curLabel}):</span>
                         <input
-                          type="number"
-                          min="0"
+                          type="text"
+                          inputMode="decimal"
                           value={tienCoc}
-                          onChange={(e) => setTienCoc(e.target.value)}
-                          placeholder="Tiền cọc VNĐ..."
+                          onChange={(e) => setTienCoc(sanitizeMoneyInput(e.target.value))}
+                          placeholder={`Tiền cọc ${curLabel}...`}
                           className="w-full px-2 py-1 bg-white border border-slate-200 rounded-lg text-xs font-bold text-amber-700"
                         />
                       </div>
