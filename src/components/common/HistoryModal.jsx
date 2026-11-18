@@ -15,7 +15,264 @@ import {
   Filter,
   Calendar
 } from 'lucide-react';
-import { matchesSearch } from '../../utils/formatters';
+import { matchesSearch, cleanNumber, formatNumber, formatCurrency } from '../../utils/formatters';
+import { compareOrderRows, normalizeAuditRows, formatOrderCell } from '../../services/auditLogService';
+
+const ORDER_MODULES = ['NHẬP', 'XUẤT'];
+
+const CHIP_TONES = {
+  green: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+  red: 'bg-rose-50 text-rose-700 border-rose-200',
+  amber: 'bg-amber-50 text-amber-800 border-amber-200',
+  blue: 'bg-sky-50 text-sky-700 border-sky-200',
+  gray: 'bg-slate-50 text-slate-600 border-slate-200'
+};
+
+// "Ngày" -> "ngày", nhưng giữ nguyên "NV xuất", "SLG"
+function lowerFirst(label) {
+  if (!label || label.length < 2) return label;
+  const second = label.charAt(1);
+  return second !== second.toUpperCase() ? label.charAt(0).toLowerCase() + label.slice(1) : label;
+}
+
+const sumQty = (rows) => rows.reduce((acc, r) => acc + (cleanNumber(r[8]) || 0), 0);
+const sumMoney = (rows) => rows.reduce((acc, r) => acc + (cleanNumber(r[10]) || 0), 0);
+const spName = (r) => (r[7] || r[6] || '').toString().trim() || 'SP';
+
+/**
+ * Tính lại so sánh từ dữ liệu cũ/mới của log để hiển thị chip tóm tắt + danh sách thay đổi.
+ * Tính từ dữ liệu (không dựa vào chuỗi tóm tắt) nên log cũ cũng không còn "thay đổi giả".
+ */
+function buildLogInsight(item) {
+  const fallbackLines = (item.tomTat || '').toString().split(' | ').map(s => s.trim()).filter(Boolean);
+  const oldRows = normalizeAuditRows(item.oldData);
+  const newRows = normalizeAuditRows(item.newData);
+  if (!ORDER_MODULES.includes(item.phanHe) || (!oldRows && !newRows)) {
+    return { comparison: null, chips: [], lines: fallbackLines };
+  }
+
+  const comparison = compareOrderRows({
+    oldRows: oldRows || [],
+    newRows: newRows || [],
+    moduleType: item.phanHe
+  });
+  const { counts, header, items } = comparison;
+  const chips = [];
+  let lines = [];
+
+  if (comparison.bothSides) {
+    header.filter(h => h.changed).forEach(h => {
+      chips.push({ tone: 'blue', text: `Đổi ${lowerFirst(h.label)}` });
+    });
+    if (counts.added) chips.push({ tone: 'green', text: `+${counts.added} SP` });
+    if (counts.removed) chips.push({ tone: 'red', text: `−${counts.removed} SP` });
+    if (counts.changed) {
+      const changedItems = items.filter(i => i.status === 'changed');
+      const onlyStatus = changedItems.every(i => i.changedCols.every(idx => idx === 15 || idx === 16));
+      chips.push({
+        tone: 'amber',
+        text: onlyStatus
+          ? (counts.changed === 1 ? 'Đổi trạng thái kho' : `Đổi trạng thái ${counts.changed} SP`)
+          : `Sửa ${counts.changed} SP`
+      });
+    }
+    if (chips.length === 0) chips.push({ tone: 'gray', text: 'Không có thay đổi' });
+    lines = comparison.changes.length > 0
+      ? comparison.changes
+      : ['Không có thay đổi thực sự (chỉ lưu lại đơn)'];
+  } else {
+    const rows = (newRows && newRows.length > 0) ? newRows : (oldRows || []);
+    const isAdd = newRows && newRows.length > 0;
+    if (item.thaoTac === 'IMPORT_EXCEL') {
+      chips.push({ tone: 'green', text: `${rows.length} dòng` });
+    } else {
+      chips.push({ tone: isAdd ? 'green' : 'red', text: `${isAdd ? '+' : '−'}${rows.length} SP` });
+    }
+    chips.push({ tone: 'gray', text: `SL ${formatNumber(sumQty(rows))}` });
+    const money = sumMoney(rows);
+    if (money) chips.push({ tone: 'gray', text: formatCurrency(money) });
+    lines = rows.map(r => `${isAdd ? 'Thêm' : 'Xóa'} SP: ${spName(r)} (SL ${formatNumber(cleanNumber(r[8]))})`);
+  }
+
+  return { comparison, chips, lines };
+}
+
+function Chip({ tone = 'gray', children }) {
+  return (
+    <span className={`inline-flex items-center px-1.5 py-0.5 rounded-md border text-[10.5px] font-semibold whitespace-nowrap ${CHIP_TONES[tone] || CHIP_TONES.gray}`}>
+      {children}
+    </span>
+  );
+}
+
+const ITEM_STATUS = {
+  added: { label: 'Thêm', row: 'bg-emerald-50/70', badge: 'bg-emerald-100 text-emerald-800 border-emerald-200' },
+  removed: { label: 'Xóa', row: 'bg-rose-50/70', badge: 'bg-rose-100 text-rose-800 border-rose-200' },
+  changed: { label: 'Sửa', row: 'bg-amber-50/60', badge: 'bg-amber-100 text-amber-800 border-amber-200' },
+  same: { label: 'Giữ nguyên', row: 'opacity-60', badge: 'bg-slate-100 text-slate-500 border-slate-200' }
+};
+
+function ChangedValue({ kind, oldVal, newVal }) {
+  const o = formatOrderCell(kind, oldVal);
+  const n = formatOrderCell(kind, newVal);
+  return (
+    <span className="inline-flex flex-wrap items-center gap-x-1">
+      <span className="line-through decoration-rose-400 text-rose-600/80">{o || '(trống)'}</span>
+      <span className="text-slate-400">→</span>
+      <span className="font-semibold text-emerald-700">{n || '(trống)'}</span>
+    </span>
+  );
+}
+
+function OrderComparison({ comparison }) {
+  const [hideUnchanged, setHideUnchanged] = useState(false);
+  const { header, itemCols, items, counts, bothSides } = comparison;
+
+  const hasValue = (v) => v !== undefined && v !== null && v.toString().trim() !== '';
+  const headerShown = header.filter(h => h.changed || hasValue(h.newVal) || hasValue(h.oldVal));
+  const alwaysCols = [6, 7, 8, 9, 10];
+  const colsShown = itemCols.filter(c =>
+    alwaysCols.includes(c.idx) ||
+    items.some(it => hasValue(it.newRow?.[c.idx]) || hasValue(it.oldRow?.[c.idx]))
+  );
+  const visibleItems = hideUnchanged ? items.filter(it => it.status !== 'same') : items;
+
+  const oldRows = items.filter(it => it.oldRow).map(it => it.oldRow);
+  const newRows = items.filter(it => it.newRow).map(it => it.newRow);
+  const totalCols = [
+    { label: 'Tổng SL', kind: 'qty', o: sumQty(oldRows), n: sumQty(newRows) },
+    { label: 'Tổng tiền', kind: 'money', o: sumMoney(oldRows), n: sumMoney(newRows) }
+  ];
+
+  return (
+    <div className="space-y-3">
+      {/* Thông tin chung */}
+      {headerShown.length > 0 && (
+        <div className="bg-white border border-slate-200 rounded-lg p-3">
+          <div className="text-[11px] font-bold text-slate-500 uppercase tracking-wide mb-2">Thông tin chung</div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-x-4 gap-y-2 text-xs">
+            {headerShown.map(h => (
+              <div key={h.idx} className={`min-w-0 rounded px-2 py-1 ${h.changed ? 'bg-sky-50 ring-1 ring-sky-200' : ''}`}>
+                <div className="text-[10.5px] text-slate-500">{h.label}{h.changed && <span className="ml-1 text-sky-700 font-semibold">• đã đổi</span>}</div>
+                <div className="text-slate-800 font-medium break-words">
+                  {h.changed
+                    ? <ChangedValue kind={h.kind} oldVal={h.oldVal} newVal={h.newVal} />
+                    : (formatOrderCell(h.kind, hasValue(h.newVal) ? h.newVal : h.oldVal) || '—')}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Bảng sản phẩm */}
+      <div className="bg-white border border-slate-200 rounded-lg overflow-hidden">
+        <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 border-b border-slate-100">
+          <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+            <span className="font-bold text-slate-500 uppercase tracking-wide mr-1">Sản phẩm</span>
+            {counts.added > 0 && <Chip tone="green">Thêm {counts.added}</Chip>}
+            {counts.removed > 0 && <Chip tone="red">Xóa {counts.removed}</Chip>}
+            {counts.changed > 0 && <Chip tone="amber">Sửa {counts.changed}</Chip>}
+            {bothSides && counts.same > 0 && <Chip tone="gray">Giữ nguyên {counts.same}</Chip>}
+          </div>
+          {bothSides && counts.same > 0 && (
+            <label className="inline-flex items-center gap-1.5 text-[11px] text-slate-600 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={hideUnchanged}
+                onChange={(e) => setHideUnchanged(e.target.checked)}
+                className="rounded border-slate-300"
+              />
+              Ẩn dòng không đổi
+            </label>
+          )}
+        </div>
+        <div className="overflow-x-auto max-h-[45vh]">
+          <table className="w-full text-xs border-collapse">
+            <thead className="bg-slate-50 text-slate-600 text-[11px] sticky top-0">
+              <tr>
+                <th className="py-2 px-2 text-left font-semibold w-20">Thay đổi</th>
+                {colsShown.map(c => (
+                  <th
+                    key={c.idx}
+                    className={`py-2 px-2 font-semibold whitespace-nowrap ${c.kind === 'qty' || c.kind === 'money' ? 'text-right' : 'text-left'}`}
+                  >
+                    {c.label}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {visibleItems.length === 0 ? (
+                <tr>
+                  <td colSpan={colsShown.length + 1} className="py-6 text-center text-slate-400">
+                    Không có dòng sản phẩm nào thay đổi.
+                  </td>
+                </tr>
+              ) : visibleItems.map(it => {
+                const st = ITEM_STATUS[it.status];
+                const row = it.newRow || it.oldRow;
+                return (
+                  <tr key={it.key} className={st.row}>
+                    <td className="py-1.5 px-2 whitespace-nowrap">
+                      <span className={`inline-flex px-1.5 py-0.5 rounded border text-[10.5px] font-semibold ${st.badge}`}>
+                        {st.label}
+                      </span>
+                    </td>
+                    {colsShown.map(c => {
+                      const isNum = c.kind === 'qty' || c.kind === 'money';
+                      const changed = it.changedCols.includes(c.idx);
+                      return (
+                        <td
+                          key={c.idx}
+                          className={`py-1.5 px-2 ${isNum ? 'text-right tabular-nums whitespace-nowrap' : ''} ${c.idx === 7 ? 'min-w-[180px]' : ''} ${changed ? 'bg-amber-100/70' : ''} ${it.status === 'removed' ? 'text-rose-800' : 'text-slate-700'}`}
+                        >
+                          {changed
+                            ? <ChangedValue kind={c.kind} oldVal={it.oldRow[c.idx]} newVal={it.newRow[c.idx]} />
+                            : (formatOrderCell(c.kind, row[c.idx]) || <span className="text-slate-300">—</span>)}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        {/* Tổng */}
+        <div className="flex flex-wrap justify-end gap-x-6 gap-y-1 px-3 py-2 border-t border-slate-100 bg-slate-50 text-xs">
+          {totalCols.map(t => (
+            <div key={t.label} className="flex items-center gap-1.5">
+              <span className="text-slate-500">{t.label}:</span>
+              {bothSides && t.o !== t.n
+                ? <ChangedValue kind={t.kind} oldVal={t.o} newVal={t.n} />
+                : <span className="font-semibold text-slate-800">{formatOrderCell(t.kind, bothSides || newRows.length ? t.n : t.o) || '0'}</span>}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RawDataPanel({ oldData, newData }) {
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div className="p-3 bg-rose-50/50 border border-rose-200 rounded-lg">
+        <div className="text-xs font-bold text-rose-800 mb-2">Dữ liệu cũ (trước khi thay đổi / đã xóa)</div>
+        <pre className="text-[11px] font-mono text-slate-700 bg-white p-2.5 rounded border border-rose-100 overflow-x-auto max-h-56 leading-relaxed">
+          {oldData ? JSON.stringify(oldData, null, 2) : '(Không có dữ liệu cũ - Thêm mới)'}
+        </pre>
+      </div>
+      <div className="p-3 bg-emerald-50/50 border border-emerald-200 rounded-lg">
+        <div className="text-xs font-bold text-emerald-800 mb-2">Dữ liệu mới (sau khi thay đổi)</div>
+        <pre className="text-[11px] font-mono text-slate-700 bg-white p-2.5 rounded border border-emerald-100 overflow-x-auto max-h-56 leading-relaxed">
+          {newData ? JSON.stringify(newData, null, 2) : '(Không có dữ liệu mới - Thao tác Xóa)'}
+        </pre>
+      </div>
+    </div>
+  );
+}
 
 const ACTION_COLORS = {
   'THÊM_MỚI': 'bg-emerald-50 text-emerald-700 border-emerald-200',
@@ -88,7 +345,7 @@ export function HistoryModal({
         newData = duLieuMoiRaw;
       }
 
-      return {
+      const base = {
         rawRow: r,
         id: id || `LOG_${idx}`,
         thoiGian: thoiGian || '',
@@ -103,6 +360,13 @@ export function HistoryModal({
         newData,
         trangThaiKhoiPhuc: (trangThaiKhoiPhuc || 'GỐC').toString().trim()
       };
+      let insight;
+      try {
+        insight = buildLogInsight(base);
+      } catch (e) {
+        insight = { comparison: null, chips: [], lines: [base.tomTat].filter(Boolean) };
+      }
+      return { ...base, insight };
     });
   }, [lichSuData]);
 
@@ -116,7 +380,7 @@ export function HistoryModal({
         return false;
       }
       if (searchTerm) {
-        const text = `${item.maDon} ${item.doiTuong} ${item.tomTat} ${item.nguoiDung} ${item.thoiGian}`;
+        const text = `${item.maDon} ${item.doiTuong} ${item.tomTat} ${item.insight.lines.join(" ")} ${item.nguoiDung} ${item.thoiGian}`;
         if (!matchesSearch(text, searchTerm)) return false;
       }
       return true;
@@ -301,10 +565,26 @@ export function HistoryModal({
                           </td>
 
                           {/* Tóm tắt */}
-                          <td className="py-2.5 px-4 text-slate-700">
-                            <div className="line-clamp-2" title={item.tomTat}>
-                              {item.tomTat}
-                            </div>
+                          <td className="py-2.5 px-4 text-slate-700" title={item.insight.lines.join('\n') || item.tomTat}>
+                            {item.insight.chips.length > 0 ? (
+                              <div className="space-y-1">
+                                <div className="flex flex-wrap items-center gap-1">
+                                  {item.insight.chips.map((c, i) => (
+                                    <Chip key={i} tone={c.tone}>{c.text}</Chip>
+                                  ))}
+                                </div>
+                                {item.insight.lines.length > 0 && (
+                                  <div className="text-[11px] text-slate-500 truncate max-w-[360px]">
+                                    {item.insight.lines[0]}
+                                    {item.insight.lines.length > 1 && (
+                                      <span className="text-slate-400"> · +{item.insight.lines.length - 1} thay đổi khác</span>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            ) : (
+                              <div className="line-clamp-2">{item.tomTat}</div>
+                            )}
                           </td>
 
                           {/* Trạng thái */}
@@ -382,27 +662,38 @@ export function HistoryModal({
               </button>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {/* Dữ liệu cũ */}
-              <div className="p-3 bg-rose-50/50 border border-rose-200 rounded-lg">
-                <div className="text-xs font-bold text-rose-800 mb-2 flex items-center gap-1.5">
-                  <span>DỮ LIỆU CŨ (TRƯỚC KHI THAY ĐỔI / ĐÃ XÓA)</span>
-                </div>
-                <pre className="text-[11px] font-mono text-slate-700 bg-white p-2.5 rounded border border-rose-100 overflow-x-auto max-h-56 leading-relaxed">
-                  {inspectRow.oldData ? JSON.stringify(inspectRow.oldData, null, 2) : '(Không có dữ liệu cũ - Thêm mới)'}
-                </pre>
+            {inspectRow.insight.comparison ? (
+              <div className="space-y-3">
+                {inspectRow.insight.comparison.bothSides && (
+                  <div className="bg-white border border-slate-200 rounded-lg p-3">
+                    <div className="text-[11px] font-bold text-slate-500 uppercase tracking-wide mb-1.5">
+                      Các thay đổi ({inspectRow.insight.comparison.changes.length})
+                    </div>
+                    {inspectRow.insight.comparison.changes.length > 0 ? (
+                      <ul className="space-y-1 text-xs text-slate-700">
+                        {inspectRow.insight.comparison.changes.map((line, i) => (
+                          <li key={i} className="flex gap-2">
+                            <span className="text-slate-400 select-none">•</span>
+                            <span>{line}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <div className="text-xs text-slate-500">Không có thay đổi thực sự — đơn chỉ được lưu lại.</div>
+                    )}
+                  </div>
+                )}
+                <OrderComparison key={inspectRow.id} comparison={inspectRow.insight.comparison} />
+                <details className="text-xs">
+                  <summary className="cursor-pointer text-slate-400 hover:text-slate-600 select-none">Xem dữ liệu gốc (kỹ thuật)</summary>
+                  <div className="mt-2">
+                    <RawDataPanel oldData={inspectRow.oldData} newData={inspectRow.newData} />
+                  </div>
+                </details>
               </div>
-
-              {/* Dữ liệu mới */}
-              <div className="p-3 bg-emerald-50/50 border border-emerald-200 rounded-lg">
-                <div className="text-xs font-bold text-emerald-800 mb-2 flex items-center gap-1.5">
-                  <span>DỮ LIỆU MỚI (SAU KHI THAY ĐỔI)</span>
-                </div>
-                <pre className="text-[11px] font-mono text-slate-700 bg-white p-2.5 rounded border border-emerald-100 overflow-x-auto max-h-56 leading-relaxed">
-                  {inspectRow.newData ? JSON.stringify(inspectRow.newData, null, 2) : '(Không có dữ liệu mới - Thao tác Xóa)'}
-                </pre>
-              </div>
-            </div>
+            ) : (
+              <RawDataPanel oldData={inspectRow.oldData} newData={inspectRow.newData} />
+            )}
           </div>
         )}
       </div>
