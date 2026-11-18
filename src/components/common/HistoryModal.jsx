@@ -35,6 +35,30 @@ function lowerFirst(label) {
   return second !== second.toUpperCase() ? label.charAt(0).toLowerCase() + label.slice(1) : label;
 }
 
+// Thời gian log dạng "YYYY-MM-DD HH:mm:ss" (có thể là định dạng khác với log cũ)
+function parseLogTime(val) {
+  const s = (val || '').toString().trim();
+  if (!s) return 0;
+  const m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?/);
+  if (m) {
+    return new Date(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0), +(m[6] || 0)).getTime();
+  }
+  const vn = s.match(/(\d{1,2})[/-](\d{1,2})[/-](\d{4})/);
+  if (vn) {
+    const t = s.match(/(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?/);
+    return new Date(+vn[3], +vn[2] - 1, +vn[1], t ? +t[1] : 0, t ? +t[2] : 0, t && t[3] ? +t[3] : 0).getTime();
+  }
+  const ts = Date.parse(s);
+  return Number.isNaN(ts) ? 0 : ts;
+}
+
+function toDayKey(time) {
+  if (!time) return '';
+  const d = new Date(time);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
 const sumQty = (rows) => rows.reduce((acc, r) => acc + (cleanNumber(r[8]) || 0), 0);
 const sumMoney = (rows) => rows.reduce((acc, r) => acc + (cleanNumber(r[10]) || 0), 0);
 const spName = (r) => (r[7] || r[6] || '').toString().trim() || 'SP';
@@ -300,6 +324,8 @@ export function HistoryModal({
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isRollingBack, setIsRollingBack] = useState(false);
   const [inspectRow, setInspectRow] = useState(null);
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
 
   useEffect(() => {
     if (isOpen) {
@@ -366,8 +392,11 @@ export function HistoryModal({
       } catch (e) {
         insight = { comparison: null, chips: [], lines: [base.tomTat].filter(Boolean) };
       }
-      return { ...base, insight };
-    });
+      const time = parseLogTime(base.thoiGian);
+      return { ...base, insight, time, dayKey: toDayKey(time), order: idx };
+    })
+      // Mới nhất lên đầu (cùng thời điểm thì dòng ghi sau lên trước)
+      .sort((a, b) => (b.time - a.time) || (b.order - a.order));
   }, [lichSuData]);
 
   // Filter logs
@@ -379,13 +408,16 @@ export function HistoryModal({
       if (selectedAction !== 'ALL' && item.thaoTac !== selectedAction) {
         return false;
       }
+      if ((dateFrom || dateTo) && !item.dayKey) return false;
+      if (dateFrom && item.dayKey < dateFrom) return false;
+      if (dateTo && item.dayKey > dateTo) return false;
       if (searchTerm) {
         const text = `${item.maDon} ${item.doiTuong} ${item.tomTat} ${item.insight.lines.join(" ")} ${item.nguoiDung} ${item.thoiGian}`;
         if (!matchesSearch(text, searchTerm)) return false;
       }
       return true;
     });
-  }, [logs, selectedModule, selectedAction, searchTerm]);
+  }, [logs, selectedModule, selectedAction, searchTerm, dateFrom, dateTo]);
 
   // Handle Rollback
   const handleRollback = async (logItem) => {
@@ -483,6 +515,37 @@ export function HistoryModal({
               <option value="IMPORT_EXCEL">Import Excel</option>
               <option value="KHÔI_PHỤC">Khôi phục</option>
             </select>
+
+            {/* Date Filter */}
+            <div className="flex items-center gap-1.5 text-xs text-slate-600">
+              <Calendar className="w-4 h-4 text-slate-400" />
+              <span>Từ</span>
+              <input
+                type="date"
+                value={dateFrom}
+                max={dateTo || undefined}
+                onChange={(e) => setDateFrom(e.target.value)}
+                className="px-2 py-1.5 text-sm bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+              <span>đến</span>
+              <input
+                type="date"
+                value={dateTo}
+                min={dateFrom || undefined}
+                onChange={(e) => setDateTo(e.target.value)}
+                className="px-2 py-1.5 text-sm bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+              {(dateFrom || dateTo) && (
+                <button
+                  type="button"
+                  onClick={() => { setDateFrom(''); setDateTo(''); }}
+                  className="px-1.5 py-1 text-slate-400 hover:text-slate-700"
+                  title="Bỏ lọc ngày"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
           </div>
 
           {/* Action buttons */}
