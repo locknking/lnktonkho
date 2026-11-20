@@ -35,7 +35,7 @@ import {
   SlidersHorizontal
 } from 'lucide-react';
 import { buildPoLinesMap, deletePoLines, getPoMoney, formatMoney } from './xnkPoLines';
-import { buildLotsMap, deletePoLots } from './xnkLots';
+import { buildLotsMap, deletePoLots, getPoLots } from './xnkLots';
 import { getPoStatusBadgeClass } from './xnkStages';
 
 const DEFAULT_XNK_DONHANG_COLUMNS = [
@@ -111,6 +111,8 @@ export function XnkDonHangModule({ onNavigate }) {
 
   useEffect(() => {
     fetchModule('xnk_donhang');
+    fetchModule('xnk_donhang_ct');
+    fetchModule('xnk_lohang');
     fetchModule('xnk_mau');
     fetchModule('xnk_ytuong');
     fetchModule('sanpham');
@@ -161,6 +163,92 @@ export function XnkDonHangModule({ onNavigate }) {
     })).filter(i => i.ma_po || i.ten_sp);
   }, [xnkDonHangData]);
 
+  // Chi tiết sản phẩm & Lô hàng
+  const poLinesMap = useMemo(() => buildPoLinesMap(xnkDonHangCtData), [xnkDonHangCtData]);
+  const lotsMap = useMemo(() => buildLotsMap(xnkLoHangData), [xnkLoHangData]);
+
+  // Tiền của từng PO theo đúng đơn vị VNĐ / $
+  const poMoneyMap = useMemo(() => {
+    const map = {};
+    donHangList.forEach(o => { map[o._sheetRow] = getPoMoney(o, poLinesMap); });
+    return map;
+  }, [donHangList, poLinesMap]);
+  const moneyOf = (item) => poMoneyMap[item._sheetRow] || { currency: 'VND', don_gia: item.don_gia, tong_tien: item.tong_tien, tien_coc: item.tien_coc };
+
+  // Danh sách hiển thị: PO đã tách lô thì tách thành các dòng riêng theo từng lô
+  // "có slg đặt của từng lô đơn giá và thông tin thì chung. khi click vào để xem và sửa thì hiện đầy đủ cả 2. chỉ tách ra làm 2 dòng thôi"
+  const displayList = useMemo(() => {
+    const list = [];
+    donHangList.forEach(order => {
+      const lots = getPoLots(order, lotsMap);
+      if (!lots || lots.length === 0) {
+        list.push({
+          ...order,
+          _po: order,
+          _rowKey: order.ma_po || String(order._sheetRow),
+          _lot: null
+        });
+        return;
+      }
+
+      // PO đã tách lô: tách mỗi lô thành 1 dòng hiển thị
+      lots.forEach((lot) => {
+        // SL đặt của từng lô
+        const lotQty = (lot.items || []).reduce((s, it) => s + (cleanNumber(it.g) || 0), 0);
+
+        // Chi tiết SKU và tên SP của lô nếu có
+        const validItems = (lot.items || []).filter(it => cleanNumber(it.g) > 0);
+        const lotNames = Array.from(new Set(validItems.map(it => it.t || it.k).filter(Boolean)));
+        const lotSkus = Array.from(new Set(validItems.map(it => it.k).filter(Boolean)));
+
+        const ten_sp = lotNames.length > 1
+          ? `${lotNames[0]} (+${lotNames.length - 1} SP khác)`
+          : (lotNames[0] || order.ten_sp);
+
+        const sku = lotSkus.length > 1
+          ? `${lotSkus[0]} (+${lotSkus.length - 1} SP khác)`
+          : (lotSkus[0] || order.sku);
+
+        // Kế hoạch bán của lô: ưu tiên thông tin lô, fallback về PO
+        const planDate = lot.ngay_mo_ban || lot.ngay_kho_nhan;
+        const planType = lot.hinh_thuc_ban || (String(order.ke_hoach_ban || '').startsWith('Bán sau') ? 'Bán sau (Trữ kho)' : 'Bán ngay');
+        const ke_hoach_ban = planDate ? `${planType} [${formatDateVN(planDate)}]` : (order.ke_hoach_ban || planType);
+
+        // Trạng thái của lô
+        let tinh_trang_cuoi = order.tinh_trang_cuoi;
+        if (order.tinh_trang_cuoi !== 'Đã hủy' && Array.isArray(lot.done)) {
+          if (lot.done[3]) tinh_trang_cuoi = 'Đã hoàn thành';
+          else if (lot.done[2]) tinh_trang_cuoi = 'Đã về kho';
+          else if (lot.done[1]) tinh_trang_cuoi = 'Đang thông quan';
+          else if (lot.done[0]) tinh_trang_cuoi = 'Đang vận chuyển';
+        }
+
+        // SL thực nhận của lô (nếu có)
+        const hasNhan = (lot.items || []).some(it => it.n !== '' && it.n !== undefined && it.n !== null);
+        const slg_thuc_nhan = hasNhan ? (lot.items || []).reduce((s, it) => s + (cleanNumber(it.n) || 0), 0) : order.slg_thuc_nhan;
+
+        list.push({
+          ...order,
+          _po: order,
+          _lot: lot,
+          _rowKey: `${order.ma_po}#${lot.ma_lo}`,
+          _lotLabel: `Lô ${lot.ma_lo}`,
+          so_luong: lotQty > 0 ? lotQty : order.so_luong,
+          ten_sp,
+          sku,
+          ke_hoach_ban,
+          tinh_trang_cuoi,
+          slg_thuc_nhan,
+          tracking_van_chuyen: lot.tracking || order.tracking_van_chuyen,
+          ngay_gui_hang: lot.ngay_gui || order.ngay_gui_hang,
+          ngay_thong_quan: lot.ngay_thong_quan || order.ngay_thong_quan,
+          ngay_kho_nhan: lot.ngay_kho_nhan || order.ngay_kho_nhan
+        });
+      });
+    });
+    return list;
+  }, [donHangList, lotsMap]);
+
   // Distinct NCC options
   const nccOptions = useMemo(() => {
     const set = new Set();
@@ -172,7 +260,7 @@ export function XnkDonHangModule({ onNavigate }) {
 
   // Filtered
   const filteredList = useMemo(() => {
-    return donHangList.filter(item => {
+    return displayList.filter(item => {
       if (statusFilter !== 'ALL' && item.tinh_trang_cuoi !== statusFilter) return false;
       if (nccFilter !== 'ALL' && item.ten_ncc !== nccFilter) return false;
       if (planFilter !== 'ALL') {
@@ -185,16 +273,24 @@ export function XnkDonHangModule({ onNavigate }) {
           matchesSearch(item.sku, searchTerm) ||
           matchesSearch(item.ten_sp, searchTerm) ||
           matchesSearch(item.ten_ncc, searchTerm) ||
-          matchesSearch(item.tracking_van_chuyen, searchTerm);
+          matchesSearch(item.tracking_van_chuyen, searchTerm) ||
+          (item._lot?.ma_lo && (matchesSearch(`Lô ${item._lot.ma_lo}`, searchTerm) || matchesSearch(item._lot.ma_lo, searchTerm)));
         if (!match) return false;
       }
       return true;
     }).sort((a, b) => {
       const timeA = parseSimpleSheetDate(a.ngay_dat_hang || a.ngay_sx_xong).getTime() || 0;
       const timeB = parseSimpleSheetDate(b.ngay_dat_hang || b.ngay_sx_xong).getTime() || 0;
-      return sortDateOrder === 'asc' ? timeA - timeB : timeB - timeA;
+      if (timeA !== timeB) {
+        return sortDateOrder === 'asc' ? timeA - timeB : timeB - timeA;
+      }
+      // Giữ các lô của cùng 1 PO đi liền nhau theo thứ tự L1, L2...
+      if (a.ma_po === b.ma_po && a._lot && b._lot) {
+        return String(a._lot.ma_lo).localeCompare(String(b._lot.ma_lo), undefined, { numeric: true });
+      }
+      return 0;
     });
-  }, [donHangList, statusFilter, nccFilter, planFilter, searchTerm, sortDateOrder]);
+  }, [displayList, statusFilter, nccFilter, planFilter, searchTerm, sortDateOrder]);
 
   // Paginated
   const paginatedList = useMemo(() => {
@@ -204,7 +300,7 @@ export function XnkDonHangModule({ onNavigate }) {
 
   const handleSelectAll = (e) => {
     if (e.target.checked) {
-      setSelectedIds(paginatedList.map(i => i.ma_po));
+      setSelectedIds(paginatedList.map(i => i._rowKey || i.ma_po));
     } else {
       setSelectedIds([]);
     }
@@ -217,22 +313,12 @@ export function XnkDonHangModule({ onNavigate }) {
   };
 
   const handleExportExcel = () => {
-    const headers = ['Mã PO', 'Mã mẫu', 'SKU', 'Tên sản phẩm', 'Nhà cung cấp', 'Số lượng', 'Đơn giá', 'Tổng tiền', 'Tiền cọc', 'Ngày đặt/cọc', 'Ngày SX xong', 'Tracking', 'Ngày gửi hàng', 'Ngày thông quan', 'Ngày kho nhận', 'SL thực nhận', 'Kế hoạch bán', 'Tình trạng cuối', 'Ghi chú'];
+    const headers = ['Mã PO', 'Lô', 'Mã mẫu', 'SKU', 'Tên sản phẩm', 'Nhà cung cấp', 'Số lượng', 'Đơn giá', 'Tổng tiền', 'Tiền cọc', 'Ngày đặt/cọc', 'Ngày SX xong', 'Tracking', 'Ngày gửi hàng', 'Ngày thông quan', 'Ngày kho nhận', 'SL thực nhận', 'Kế hoạch bán', 'Tình trạng cuối', 'Ghi chú'];
     const rows = filteredList.map(d => [
-      d.ma_po, d.id_mau, d.sku, d.ten_sp, d.ten_ncc, d.so_luong, d.don_gia, d.tong_tien, d.tien_coc, d.ngay_dat_hang, d.ngay_sx_xong, d.tracking_van_chuyen, d.ngay_gui_hang, d.ngay_thong_quan, d.ngay_kho_nhan, d.slg_thuc_nhan, d.ke_hoach_ban, d.tinh_trang_cuoi, d.ghi_chu
+      d.ma_po, d._lot ? `Lô ${d._lot.ma_lo}` : '', d.id_mau, d.sku, d.ten_sp, d.ten_ncc, d.so_luong, d.don_gia, d.tong_tien, d.tien_coc, d.ngay_dat_hang, d.ngay_sx_xong, d.tracking_van_chuyen, d.ngay_gui_hang, d.ngay_thong_quan, d.ngay_kho_nhan, d.slg_thuc_nhan, d.ke_hoach_ban, d.tinh_trang_cuoi, d.ghi_chu
     ]);
     exportToExcel([headers, ...rows], 'XNK_DON_HANG_PO.xlsx', 'DON_HANG_PO');
   };
-
-  const poLinesMap = useMemo(() => buildPoLinesMap(xnkDonHangCtData), [xnkDonHangCtData]);
-  // Tiền của từng PO theo đúng đơn vị VNĐ / $
-  const poMoneyMap = useMemo(() => {
-    const map = {};
-    donHangList.forEach(o => { map[o._sheetRow] = getPoMoney(o, poLinesMap); });
-    return map;
-  }, [donHangList, poLinesMap]);
-  const moneyOf = (item) => poMoneyMap[item._sheetRow] || { currency: 'VND', don_gia: item.don_gia, tong_tien: item.tong_tien, tien_coc: item.tien_coc };
-  const lotsMap = useMemo(() => buildLotsMap(xnkLoHangData), [xnkLoHangData]);
 
   const handleDelete = async (sheetRow, maPo) => {
     if (!window.confirm(`Bạn có chắc chắn muốn xóa đơn hàng PO [${maPo}]?`)) return;
@@ -277,7 +363,7 @@ export function XnkDonHangModule({ onNavigate }) {
         </div>
 
         <div className="text-xs font-medium text-slate-500">
-          Tổng cộng: <strong className="text-slate-800">{filteredList.length}</strong> đơn PO
+          Tổng cộng: <strong className="text-slate-800">{filteredList.length}</strong> {filteredList.length !== donHangList.length ? `dòng (${donHangList.length} đơn PO)` : 'đơn PO'}
         </div>
       </div>
 
@@ -365,7 +451,11 @@ export function XnkDonHangModule({ onNavigate }) {
         {/* Right Actions */}
         <div className="flex items-center gap-2">
           <button
-            onClick={() => fetchModule('xnk_donhang', true)}
+            onClick={() => {
+              fetchModule('xnk_donhang', true);
+              fetchModule('xnk_donhang_ct', true);
+              fetchModule('xnk_lohang', true);
+            }}
             disabled={loadingModules.xnk_donhang}
             className="p-2 text-slate-600 hover:bg-slate-100 rounded-xl transition cursor-pointer"
             title="Làm mới dữ liệu"
@@ -446,7 +536,7 @@ export function XnkDonHangModule({ onNavigate }) {
                         <th key={col.key} style={widthStyle} className={`py-2.5 px-3 ${alignClass}`}>
                           <input
                             type="checkbox"
-                            checked={paginatedList.length > 0 && selectedIds.length === paginatedList.length}
+                            checked={paginatedList.length > 0 && paginatedList.every(i => selectedIds.includes(i._rowKey || i.ma_po))}
                             onChange={handleSelectAll}
                             className="rounded border-slate-300 text-blue-600 focus:ring-0 cursor-pointer"
                           />
@@ -492,13 +582,14 @@ export function XnkDonHangModule({ onNavigate }) {
                   </tr>
                 ) : (
                   paginatedList.map((item) => {
-                    const isSelected = selectedIds.includes(item.ma_po);
+                    const rowKey = item._rowKey || item.ma_po;
+                    const isSelected = selectedIds.includes(rowKey);
 
                     return (
                       <tr 
-                        key={item.ma_po} 
+                        key={rowKey} 
                         onClick={() => {
-                          setDetailItem(item);
+                          setDetailItem(item._po || item);
                           setIsDetailOpen(true);
                         }}
                         className={`hover:bg-slate-50/70 transition cursor-pointer ${isSelected ? 'bg-blue-50/40' : ''}`}
@@ -517,7 +608,7 @@ export function XnkDonHangModule({ onNavigate }) {
                                   <input
                                     type="checkbox"
                                     checked={isSelected}
-                                    onChange={() => handleToggleSelect(item.ma_po)}
+                                    onChange={() => handleToggleSelect(rowKey)}
                                     className="rounded border-slate-300 text-blue-600 focus:ring-0 cursor-pointer"
                                   />
                                 </td>
@@ -525,9 +616,16 @@ export function XnkDonHangModule({ onNavigate }) {
                             case 'ma_po':
                               return (
                                 <td key={col.key} style={widthStyle} className={`py-2.5 px-3 whitespace-nowrap ${alignClass}`}>
-                                  <span className="px-2 py-0.5 rounded-md bg-slate-100 border border-slate-200 text-slate-700 font-bold text-[11px]">
-                                    {item.ma_po}
-                                  </span>
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="px-2 py-0.5 rounded-md bg-slate-100 border border-slate-200 text-slate-700 font-bold text-[11px]">
+                                      {item.ma_po}
+                                    </span>
+                                    {item._lot && (
+                                      <span className="px-1.5 py-0.5 rounded-md bg-indigo-50 border border-indigo-200 text-indigo-700 font-black text-[10px]">
+                                        Lô {item._lot.ma_lo}
+                                      </span>
+                                    )}
+                                  </div>
                                 </td>
                               );
                             case 'ngay_dat_hang':
@@ -610,7 +708,7 @@ export function XnkDonHangModule({ onNavigate }) {
                                   <button
                                     onClick={(e) => {
                                       e.stopPropagation();
-                                      setTrackingOrder(item);
+                                      setTrackingOrder(item._po || item);
                                       setIsTrackingModalOpen(true);
                                     }}
                                     className="px-2 py-1 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-700 font-bold text-[11px] inline-flex items-center gap-1 transition cursor-pointer"
@@ -625,7 +723,7 @@ export function XnkDonHangModule({ onNavigate }) {
                                   <div className="flex items-center justify-center gap-1">
                                     <button
                                       onClick={() => {
-                                        setSelectedItem(item);
+                                        setSelectedItem(item._po || item);
                                         setIsDrawerOpen(true);
                                       }}
                                       title="Sửa PO"
@@ -692,7 +790,11 @@ export function XnkDonHangModule({ onNavigate }) {
         onClose={() => setIsDrawerOpen(false)}
         editItem={selectedItem}
         sampleList={sampleList}
-        onSaved={() => fetchModule('xnk_donhang', true)}
+        onSaved={() => {
+          fetchModule('xnk_donhang', true);
+          fetchModule('xnk_donhang_ct', true);
+          fetchModule('xnk_lohang', true);
+        }}
       />
 
       {/* Stepper Tracking Modal */}
@@ -702,6 +804,8 @@ export function XnkDonHangModule({ onNavigate }) {
         order={trackingOrder}
         onSaved={async () => {
           await fetchModule('xnk_donhang', true);
+          await fetchModule('xnk_donhang_ct', true);
+          await fetchModule('xnk_lohang', true);
         }}
       />
 

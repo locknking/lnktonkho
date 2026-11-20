@@ -8,7 +8,7 @@ import { XnkDonHangDrawer } from './XnkDonHangDrawer';
 import { XnkTrackingModal, getPoKanbanStage } from './XnkTrackingModal';
 import { PO_KANBAN_COLUMNS, getPoStatusBadgeClass } from './xnkStages';
 import { STAGE_ICONS } from './PoStageViews';
-import { buildLotsMap, buildKanbanCards, deletePoLots } from './xnkLots';
+import { buildLotsMap, buildKanbanCards, deletePoLots, getPoLots } from './xnkLots';
 import { XnkChiTietModal } from './XnkChiTietModal';
 import { exportToExcel } from '../../../services/excelService';
 import { 
@@ -377,9 +377,77 @@ export function XnkModule({ onNavigate }) {
     });
   }, [parsedMauList, ytuongMap, statusFilter, rankFilter, nccFilter, dateFrom, dateTo, searchTerm, sortDateOrder]);
 
+  // Lô vận chuyển của PO (Kanban & Bảng PO: mỗi lô 1 dòng/thẻ)
+  const lotsMap = useMemo(() => buildLotsMap(xnkLoHangData), [xnkLoHangData]);
+
+  // Danh sách hiển thị Đơn PO: PO đã tách lô thì tách thành các dòng theo từng lô
+  const displayDonHangList = useMemo(() => {
+    const list = [];
+    parsedDonHangList.forEach(order => {
+      const lots = getPoLots(order, lotsMap);
+      if (!lots || lots.length === 0) {
+        list.push({
+          ...order,
+          _po: order,
+          _rowKey: order.ma_po || String(order._sheetRow),
+          _lot: null
+        });
+        return;
+      }
+      lots.forEach((lot) => {
+        const lotQty = (lot.items || []).reduce((s, it) => s + (cleanNumber(it.g) || 0), 0);
+        const validItems = (lot.items || []).filter(it => cleanNumber(it.g) > 0);
+        const lotNames = Array.from(new Set(validItems.map(it => it.t || it.k).filter(Boolean)));
+        const lotSkus = Array.from(new Set(validItems.map(it => it.k).filter(Boolean)));
+
+        const ten_sp = lotNames.length > 1
+          ? `${lotNames[0]} (+${lotNames.length - 1} SP khác)`
+          : (lotNames[0] || order.ten_sp);
+
+        const sku = lotSkus.length > 1
+          ? `${lotSkus[0]} (+${lotSkus.length - 1} SP khác)`
+          : (lotSkus[0] || order.sku);
+
+        const planDate = lot.ngay_mo_ban || lot.ngay_kho_nhan;
+        const planType = lot.hinh_thuc_ban || (String(order.ke_hoach_ban || '').startsWith('Bán sau') ? 'Bán sau (Trữ kho)' : 'Bán ngay');
+        const ke_hoach_ban = planDate ? `${planType} [${formatDateVN(planDate)}]` : (order.ke_hoach_ban || planType);
+
+        let tinh_trang_cuoi = order.tinh_trang_cuoi;
+        if (order.tinh_trang_cuoi !== 'Đã hủy' && Array.isArray(lot.done)) {
+          if (lot.done[3]) tinh_trang_cuoi = 'Đã hoàn thành';
+          else if (lot.done[2]) tinh_trang_cuoi = 'Đã về kho';
+          else if (lot.done[1]) tinh_trang_cuoi = 'Đang thông quan';
+          else if (lot.done[0]) tinh_trang_cuoi = 'Đang vận chuyển';
+        }
+
+        const hasNhan = (lot.items || []).some(it => it.n !== '' && it.n !== undefined && it.n !== null);
+        const slg_thuc_nhan = hasNhan ? (lot.items || []).reduce((s, it) => s + (cleanNumber(it.n) || 0), 0) : order.slg_thuc_nhan;
+
+        list.push({
+          ...order,
+          _po: order,
+          _lot: lot,
+          _rowKey: `${order.ma_po}#${lot.ma_lo}`,
+          _lotLabel: `Lô ${lot.ma_lo}`,
+          so_luong: lotQty > 0 ? lotQty : order.so_luong,
+          ten_sp,
+          sku,
+          ke_hoach_ban,
+          tinh_trang_cuoi,
+          slg_thuc_nhan,
+          tracking_van_chuyen: lot.tracking || order.tracking_van_chuyen,
+          ngay_gui_hang: lot.ngay_gui || order.ngay_gui_hang,
+          ngay_thong_quan: lot.ngay_thong_quan || order.ngay_thong_quan,
+          ngay_kho_nhan: lot.ngay_kho_nhan || order.ngay_kho_nhan
+        });
+      });
+    });
+    return list;
+  }, [parsedDonHangList, lotsMap]);
+
   // Filtered Đơn PO (sắp xếp theo ngày lớn tới nhỏ)
   const filteredDonHang = useMemo(() => {
-    return parsedDonHangList.filter(item => {
+    return displayDonHangList.filter(item => {
       if (statusFilter !== 'ALL' && item.tinh_trang_cuoi !== statusFilter) return false;
       if (nccFilter !== 'ALL' && item.ten_ncc !== nccFilter) return false;
       if (planFilter !== 'ALL' && item.ke_hoach_ban !== planFilter) return false;
@@ -390,16 +458,23 @@ export function XnkModule({ onNavigate }) {
           matchesSearch(item.sku, searchTerm) ||
           matchesSearch(item.ten_sp, searchTerm) ||
           matchesSearch(item.ten_ncc, searchTerm) ||
-          matchesSearch(item.tracking_van_chuyen, searchTerm);
+          matchesSearch(item.tracking_van_chuyen, searchTerm) ||
+          (item._lot?.ma_lo && (matchesSearch(`Lô ${item._lot.ma_lo}`, searchTerm) || matchesSearch(item._lot.ma_lo, searchTerm)));
         if (!match) return false;
       }
       return true;
     }).sort((a, b) => {
       const timeA = parseSimpleSheetDate(a.ngay_dat_hang || a.ngay_kho_nhan).getTime() || 0;
       const timeB = parseSimpleSheetDate(b.ngay_dat_hang || b.ngay_kho_nhan).getTime() || 0;
-      return sortDateOrder === 'asc' ? timeA - timeB : timeB - timeA;
+      if (timeA !== timeB) {
+        return sortDateOrder === 'asc' ? timeA - timeB : timeB - timeA;
+      }
+      if (a.ma_po === b.ma_po && a._lot && b._lot) {
+        return String(a._lot.ma_lo).localeCompare(String(b._lot.ma_lo), undefined, { numeric: true });
+      }
+      return 0;
     });
-  }, [parsedDonHangList, statusFilter, nccFilter, planFilter, dateFrom, dateTo, searchTerm, sortDateOrder]);
+  }, [displayDonHangList, statusFilter, nccFilter, planFilter, dateFrom, dateTo, searchTerm, sortDateOrder]);
 
   // Filtered Tiến độ các chặng (dành cho Tab 4 Kanban, sắp xếp theo ngày lớn tới nhỏ)
   const filteredTiendo = useMemo(() => {
@@ -424,8 +499,6 @@ export function XnkModule({ onNavigate }) {
     });
   }, [parsedDonHangList, nccFilter, planFilter, dateFrom, dateTo, searchTerm, sortDateOrder]);
 
-  // Lô vận chuyển của PO (Kanban: mỗi lô 1 thẻ)
-  const lotsMap = useMemo(() => buildLotsMap(xnkLoHangData), [xnkLoHangData]);
   const tiendoKanbanCards = useMemo(() => buildKanbanCards(filteredTiendo, lotsMap, poLinesMap), [filteredTiendo, lotsMap, poLinesMap]);
 
   // Handle Tab-specific current items
@@ -1283,16 +1356,23 @@ export function XnkModule({ onNavigate }) {
                 ) : (
                   paginatedDonHang.map((item) => (
                     <tr 
-                      key={item.ma_po} 
+                      key={item._rowKey || item.ma_po} 
                       onClick={() => {
-                        setDetailItem(item);
+                        setDetailItem(item._po || item);
                         setDetailType('donhang');
                         setIsDetailOpen(true);
                       }}
                       className="hover:bg-slate-50/70 transition cursor-pointer"
                     >
                       <td className="py-2.5 px-3 font-semibold text-blue-700 whitespace-nowrap">
-                        {item.ma_po}
+                        <div className="flex items-center gap-1.5">
+                          <span>{item.ma_po}</span>
+                          {item._lot && (
+                            <span className="px-1.5 py-0.5 rounded-md bg-indigo-50 border border-indigo-200 text-indigo-700 font-black text-[10px]">
+                              Lô {item._lot.ma_lo}
+                            </span>
+                          )}
+                        </div>
                       </td>
                       <td className="py-2.5 px-3 text-slate-500 whitespace-nowrap font-medium">
                         {formatDateVN(item.ngay_dat_hang) || '-'}
@@ -1336,7 +1416,7 @@ export function XnkModule({ onNavigate }) {
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
-                            setTrackingOrder(item);
+                            setTrackingOrder(item._po || item);
                             setIsTrackingModalOpen(true);
                           }}
                           className="px-2.5 py-1 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-700 font-bold text-[11px] inline-flex items-center gap-1 transition cursor-pointer"
@@ -1348,7 +1428,7 @@ export function XnkModule({ onNavigate }) {
                         <div className="flex items-center justify-center gap-1">
                           <button
                             onClick={() => {
-                              setSelectedDonHang(item);
+                              setSelectedDonHang(item._po || item);
                               setIsDonHangDrawerOpen(true);
                             }}
                             title="Sửa PO"
